@@ -1,122 +1,87 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
-	"image"
-	"image/color"
-	"image/draw"
-	"image/jpeg"
-	"image/png"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
-
-	"github.com/nfnt/resize"
+	"strings"
 )
 
-func main() {
-	if len(os.Args) < 3 {
-		fmt.Println("Usage: go run main.go <directory> <watermark>")
+func countLinesInFile(filename string, wg *sync.WaitGroup, resultChan chan<- string) {
+	defer wg.Done()
+
+	file, err := os.Open(filename)
+	if err != nil {
+		resultChan <- fmt.Sprintf("Ошибка при открытии файла %s: %v", filename, err)
+		return
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	lineCount := 0
+	for scanner.Scan() {
+		lineCount++
+	}
+
+	if err := scanner.Err(); err != nil {
+		resultChan <- fmt.Sprintf("Ошибка при чтении файла %s: %v", filename, err)
 		return
 	}
 
-	directory := os.Args[1]
-	watermarkText := os.Args[2]
+	resultChan <- fmt.Sprintf("Файл %s содержит %d строк", filename, lineCount)
+}
 
-	var wg sync.WaitGroup
-
+func findTextFiles(directory string) ([]string, error) {
+	var textFiles []string
 	err := filepath.Walk(directory, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
 
-		if info.IsDir() {
-			return nil
+		if !info.IsDir() && strings.HasSuffix(info.Name(), ".txt") {
+			textFiles = append(textFiles, path)
 		}
-
-		if isImageFile(path) {
-			wg.Add(1)
-			go func(filePath string) {
-				defer wg.Done()
-				processImage(filePath, watermarkText)
-			}(path)
-		}
-
 		return nil
 	})
+	return textFiles, err
+}
 
-	if err != nil {
-		fmt.Println("Error walking the path:", err)
+func main() {
+	if len(os.Args) < 2 {
+		fmt.Println("Использование: go run main.go <путь_к_каталогу>")
 		return
 	}
 
-	wg.Wait()
-	fmt.Println("Processing complete.")
-}
+	directory := os.Args[1]
 
-func isImageFile(path string) bool {
-	ext := strings.ToLower(filepath.Ext(path))
-	return ext == ".png" || ext == ".jpg" || ext == ".jpeg"
-}
-
-func processImage(imagePath, watermarkText string) {
-	file, err := os.Open(imagePath)
+	textFiles, err := findTextFiles(directory)
 	if err != nil {
-		fmt.Println("Error opening image:", err)
-		return
-	}
-	defer file.Close()
-
-	img, _, err := image.Decode(file)
-	if err != nil {
-		fmt.Println("Error decoding image:", err)
+		fmt.Printf("Ошибка при поиске файлов: %v\n", err)
 		return
 	}
 
-	imgWithWatermark := applyWatermark(img, watermarkText)
-
-	outputPath := filepath.Join("output", filepath.Base(imagePath))
-	err = saveImage(outputPath, imgWithWatermark)
-	if err != nil {
-		fmt.Println("Error saving image:", err)
+	if len(textFiles) == 0 {
+		fmt.Println("Не найдено файлов с расширением .txt")
 		return
 	}
 
-	fmt.Println("Processed:", imagePath)
-}
+	resultChan := make(chan string, len(textFiles))
 
-func applyWatermark(img image.Image, watermarkText string) image.Image {
-	bounds := img.Bounds()
-	width := bounds.Dx()
-	height := bounds.Dy()
+	var wg sync.WaitGroup
 
-	dst := image.NewRGBA(image.Rect(0, 0, width, height))
-
-	draw.Draw(dst, bounds, img, image.Point{0, 0}, draw.Over)
-
-	textColor := color.RGBA{255, 255, 255, 255}
-
-	addWatermarkText(dst, watermarkText, width-150, height-50, textColor)
-
-	return dst
-}
-
-func addWatermarkText(img *image.RGBA, text string, x, y int, c color.Color) {
-}
-
-func saveImage(filePath string, img image.Image) error {     
-	ext := strings.ToLower(filepath.Ext(filePath))
-	outFile, err := os.Create(filePath)
-	if err != nil {
-		return err
+	for _, file := range textFiles {
+		wg.Add(1)
+		go countLinesInFile(file, &wg, resultChan)
 	}
-	defer outFile.Close()
 
-	if ext == ".png" {
-		return png.Encode(outFile, img)
-	} else if ext == ".jpg" || ext == ".jpeg" {
-		return jpeg.Encode(outFile, img, nil)
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+
+	for result := range resultChan {
+		fmt.Println(result)
 	}
-	return fmt.Errorf("unsupported file format")
 }
